@@ -93,7 +93,7 @@ TaDaDaJS.prototype.genToken = function (params, password) {
             if (params.halgo_length) { this.halgo_length = parseInt(params.halgo_length) }
             if (params.halgo) { this.halgo = params.halgo }
             return crypto.subtle.deriveKey({name: 'PBKDF2', hash: this.halgo, salt: salt, iterations: parseInt(params.count)}, 
-                cryptokey, {name: 'HMAC', hash: this.halgo, length: this.halgo_length}, true, ['sign'])
+                cryptokey, {name: 'HMAC', hash: this.halgo, length: this.halgo_length}, false, ['sign'])
         })
         .then(key => {
             return crypto.subtle.sign({name: 'HMAC', hash: this.halgo, length: this.halgo_length}, key, this.b64ToArray(params.auth))
