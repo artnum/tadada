@@ -342,6 +342,35 @@ TaDaDaJS.prototype.isLogged = function () {
     })
 }
 
+/* a bit ugly ... */
+TaDaDaJS.prototype.checkPassword = function (userid, password) {
+    return new Promise(resolve => {
+        const nonce = this.getNonce()
+        this.init(userid, nonce)
+        .then(params => {
+            if (params.algo) {
+                switch (params.algo) {
+                    default:
+                    case 'SHA-256': this.halgo = 'SHA-256'; break;
+                    case 'SHA-384': this.halgo = 'SHA-384'; break;
+                    case 'SHA-512': this.halgo = 'SHA-512'; break;
+                }
+            }
+            return this.genToken(params, password, nonce)
+        })
+        .then(token => {
+            this.check(token)
+        })
+        .then(token => {
+            this.quit(token)
+            resolve(true)
+        })
+        .catch(_ => {
+            resolve(false)
+        })
+    })
+}
+
 TaDaDaJS.prototype.login = function (userid, password) {
     return new Promise((resolve, reject) => {
         const nonce = this.getNonce()
