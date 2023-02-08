@@ -8,6 +8,7 @@ interface User {
     public function get($userid);
     public function getByUsername($username);
     public function setPassword($userid, $key, $keyopts);
+    public function canImpersonate($userid, $impersonateid);
 }
 
 class Auth {
@@ -16,12 +17,19 @@ class Auth {
     protected $timeout;
     protected $current_userid;
 
-    const HASH_ALGO = 'sha256'; /* fixed as it must match available javascript algo */
-    const HASH_ALGO_LENGTH = 32; /* fixed as it must match algo */
-    const SHARE_NONE = 0;
-    const SHARE_PERMANENT = 1;
-    const SHARE_TEMPORARY = 2;
-    const SHARE_PROXY = 3; /* to create token for proxy, never expires, not bound to any url, not bound to any user */
+    const HASH = [
+        'SHA-256' => ['sha256', 32],
+        'SHA-384' => ['sha384', 48],
+        'SHA-512' => ['sha512', 64]
+    ];
+    const SHARE_NONE = 0x00;
+    const SHARE_TEMPORARY = 0x01;
+    const SHARE_LIMITED_ONCE = 0x02; /* share until used once but with time limit */
+    const SHARE_NOT_TIMED = 0x80; /* not used, below time apply, above time don't apply */
+    const SHARE_PERMANENT = 0x81;
+    const SHARE_PROXY = 0x82; /* to create token for proxy, never expires, not bound to any url, not bound to any user */
+    const SHARE_UNLIMITED_ONCE = 0x83; /* share until used once */
+    const SHARE_USER_PROXY = 0x84; /* to create token for proxy, never expires, not bound to any url, bound to specific user */
 
     function __construct(PDO $pdo, String $table = 'tadada_auth') {
         $this->pdo = $pdo;
@@ -34,31 +42,23 @@ class Auth {
         return $this->current_userid;
     }
 
-    function delete_outdated() {
-        $stmt = $this->pdo->prepare(sprintf('DELETE FROM %s WHERE (time + duration) > :time AND share <> :shareproxy AND share <> :sharepermanent', $this->table));
-        $stmt->bindValue(':time', time(), PDO::PARAM_INT);
-        $stmt->bindValue(':shareproxy', Auth::SHARE_PROXY, PDO::PARAM_INT);
-        $stmt->bindValue(':sharepermanent', Auth::SHARE_PERMANENT, PDO::PARAM_INT);
-        return $stmt->execute();
-    }
-
-    function generate_auth ($userid, $hpw) {
-        $sign = random_bytes(Auth::HASH_ALGO_LENGTH);
-        $authvalue = base64_encode(hash_hmac(Auth::HASH_ALGO, $sign, base64_decode($hpw), true));
+    function generate_auth ($userid, $hpw, $cnonce = '', $hash = 'SHA-256') {
+        $sign = random_bytes(Auth::HASH[$hash][1]);
+        $authvalue = base64_encode(hash_hmac(Auth::HASH[$hash][0], $sign . $cnonce, base64_decode($hpw), true));
         if ($this->add_auth($userid, $authvalue, '', Auth::SHARE_NONE)) {
             return base64_encode($sign);
         }
         return '';
     }
 
-    function generate_share_auth ($userid, $authvalue, $url, $permanent = Auth::SHARE_PERMANENT, $comment = '', $duration = -1) {
+    function generate_share_auth ($userid, $authvalue, $url, $permanent = Auth::SHARE_PERMANENT, $comment = '', $duration = -1, $hash = 'SHA-256') {
         $share_authvalue = $this->get_share_auth($userid, $url, $permanent);
         if (!empty($share_authvalue)) { 
             $this->refresh_auth($share_authvalue);
             return $share_authvalue; 
         }
-        $sign = random_bytes(Auth::HASH_ALGO_LENGTH);
-        $share_authvalue = base64_encode(hash_hmac(Auth::HASH_ALGO, $sign, base64_decode($authvalue), true));
+        $sign = random_bytes(Auth::HASH[$hash][1]);
+        $share_authvalue = base64_encode(hash_hmac(Auth::HASH[$hash][0], $sign, base64_decode($authvalue), true));
         if ($this->add_auth($userid, $share_authvalue, $this->prepare_url($url), $permanent, $comment, $duration)) {
             return $share_authvalue;
         }
@@ -86,9 +86,10 @@ class Auth {
             if (strpos($element, 'access_token=') === 0) { return false; }
             return true;
         });
+        if (empty($parts)) { return ''; }
         /* sort to allow query begin like ?length=10&time=20 or ?time=20&length=10 */
         sort($parts, SORT_STRING);
-        return implode('&', $parts);
+        return '?' . implode('&', $parts);
     }
 
     function prepare_url($url) 
@@ -105,9 +106,19 @@ class Auth {
         $host = array_filter($host, function ($e) { return (empty($e) ? false : true); });
         $url = implode('.', $host);
         if (isset($parsed['path']) && $parsed['path'] !== null) {  $url .= str_replace('//', '/', $parsed['path']); }
-        if (isset($parsed['query']) && $parsed['query'] !== null ) { $url .= '?' . $this->prepare_url_query($parsed['query']); }
+        if (isset($parsed['query']) && $parsed['query'] !== null ) { $url .= $this->prepare_url_query($parsed['query']); }
 
-        return $url;
+        return str_replace('//', '/', $url);
+    }
+
+    function check_auth_header () {
+        $url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://$_SERVER[HTTP_HOST]$_SERVER[REQUEST_URI]";
+        try {
+            $token = $this->get_auth_token();
+        } catch (Exception $e) {
+            return false;
+        }
+        return $this->check_auth($token, $url);
     }
 
     function confirm_auth ($authvalue) {
@@ -120,10 +131,10 @@ class Auth {
 
             $done = $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <confirm-auth>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <confirm-auth>, "%s"', $e->getMessage()));
         } finally {
             if ($done) {
-                return $this->check_auth($authvalue);
+                return $this->check_auth_nodelete($authvalue);
             }
             return $done;
         }
@@ -158,7 +169,7 @@ class Auth {
 
             $done = $stmt->execute();
         } catch (Exception $e) {
-            error_log(sprintf('kaal-auth <add-auth>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <add-auth>, "%s"', $e->getMessage()));
         } finally {
             return $done;
         }
@@ -171,15 +182,29 @@ class Auth {
             $stmt->bindValue(':auth', $authvalue, PDO::PARAM_STR);
             $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-auth>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-auth>, "%s"', $e->getMessage()));
         } finally {
             return true;
         }
     }
 
+    private function check_auth_nodelete($authvalue) {
+        try {
+            $stmt = $this->pdo->prepare(sprintf('SELECT * FROM %s WHERE auth = :auth', $this->table));
+            $stmt->bindValue(':auth', $authvalue, PDO::PARAM_STR);
+            $stmt->execute();
+            if ($stmt->rowCount() < 1) { throw new Exception('No known auth'); }
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $this->current_userid = intval($row['userid']);
+            return true;
+        } catch (Exception $e) {
+            error_log(sprintf('tadada-auth <check_auth_nodelete>, "%s"', $e->getMessage()));
+
+        }
+    }
+
     function check_auth ($authvalue, $url = '') {
         $pdo = $this->pdo;
-        $matching = false;
         try {
             $urlid = '';
             if (!empty($url)) { $urlid = sha1($this->prepare_url($url)); }
@@ -187,29 +212,42 @@ class Auth {
             $stmt->bindValue(':auth', $authvalue, PDO::PARAM_STR);
             $stmt->execute();
             while (($row = $stmt->fetch(PDO::FETCH_ASSOC))) {
-                if (
-                        (intval($row['share']) !== Auth::SHARE_PERMANENT && intval($row['share']) !== Auth::SHARE_PROXY) 
-                        && (time() - intval($row['time']) > intval($row['duration']))
-                    ) {
-                    $this->del_specific_auth($row['auth']);
-                } else {
-                    if (intval($row['share']) === Auth::SHARE_PROXY) {
-                        $matching = true;
+                if ((intval($row['share']) < Auth::SHARE_NOT_TIMED)
+                    && (time() - intval($row['time']) > intval($row['duration']))
+                ) {
+                    /* overtime, delete and next auth token ... if any */
+                    $this->del_all_connection_by_id($row['uid']);                    
+                    continue;
+                }
+                
+                switch(intval($row['share'])) {
+                    default:
+                    case Auth::SHARE_NOT_TIMED:
+                        break;
+                    case Auth::SHARE_NONE:
+                        $this->current_userid = intval($row['userid']);
+                        return true;
+                    case Auth::SHARE_PERMANENT:
+                    case Auth::SHARE_TEMPORARY:
+                        if ($row['urlid'] !== $urlid) { break; }
+                        $this->current_userid = intval($row['userid']);
+                        return true;
+                        break;
+                    case Auth::SHARE_PROXY: // proxy have complete access
                         $this->current_userid = 0;
+                        return true;
+                    case Auth::SHARE_USER_PROXY:
+                        $this->current_userid = intval($row['userid']);
                         break;
-                    }
-                    if (intval($row['share']) !== Auth::SHARE_NONE && $row['urlid'] !== $urlid) {
-                        break;
-                    }
-                    $matching = true;
-                    $this->current_userid = $row['userid'];
-                    break;
+                    case Auth::SHARE_UNLIMITED_ONCE:
+                    case Auth::SHARE_LIMITED_ONCE:
+                        $this->current_userid = intval($row['userid']);
+                        $this->del_all_connection_by_id($row['uid']);
+                        return true;
                 }
             }
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <check-auth>, "%s"', $e->getMessage()));
-        } finally {
-            return $matching;
+            error_log(sprintf('tadada-auth <check-auth>, "%s"', $e->getMessage()));
         }
     }
 
@@ -227,7 +265,7 @@ class Auth {
 
             $done = $stmt->execute();
         } catch (Exception $e) {
-            error_log(sprintf('kaal-auth <refresh-auth>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <refresh-auth>, "%s"', $e->getMessage()));
         } finally {
             return $done;
         }
@@ -252,7 +290,7 @@ class Auth {
                 }
             }
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <get-id>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <get-id>, "%s"', $e->getMessage()));
         } finally {
             return $matching;
         }
@@ -268,7 +306,7 @@ class Auth {
             if (count($authContent) !== 2) { throw new Exception(('Wrong auth header')); }
             return $authContent[1];
         } catch (Exception $e) {
-            error_log(sprintf('kaal-auth <get-auth-token>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <get-auth-token>, "%s"', $e->getMessage()));
         }
     }
 
@@ -304,7 +342,7 @@ class Auth {
                 }
             }
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <get-active-connection>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <get-active-connection>, "%s"', $e->getMessage()));
         } finally {
             return $connections;
         }
@@ -316,7 +354,7 @@ class Auth {
             $del->bindValue(':auth', $authvalue, PDO::PARAM_STR);
             $del->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-specific-auth>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-specific-auth>, "%s"', $e->getMessage()));
         }
     }            
 
@@ -327,7 +365,7 @@ class Auth {
             $stmt->bindValue(':uid', $connectionid, PDO::PARAM_INT);
             return $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-specific-connection>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-specific-connection>, "%s"', $e->getMessage()));
         } 
     }
 
@@ -338,7 +376,7 @@ class Auth {
             $stmt->bindValue(':userid', $userid, PDO::PARAM_INT);
             return $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-all-shares>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-all-shares>, "%s"', $e->getMessage()));
         } 
     }
 
@@ -349,7 +387,7 @@ class Auth {
             $stmt->bindValue(':userid', $userid, PDO::PARAM_INT);
             return $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-all-connections-shares>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-all-connections-shares>, "%s"', $e->getMessage()));
         } 
     }
 
@@ -360,7 +398,7 @@ class Auth {
             $stmt->bindValue(':userid', $userid, PDO::PARAM_INT);
             return $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-all-connections>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-all-connections>, "%s"', $e->getMessage()));
         } 
     }
 
@@ -372,7 +410,7 @@ class Auth {
             $stmt->execute();
             return $stmt->fetch(PDO::FETCH_ASSOC);
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <get-auth-by-id>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <get-auth-by-id>, "%s"', $e->getMessage()));
         }
     }
 
@@ -383,7 +421,7 @@ class Auth {
             $stmt->bindValue(':userid', $this->current_userid, PDO::PARAM_INT);
             return $stmt->execute();
         } catch(Exception $e) {
-            error_log(sprintf('kaal-auth <del-all-connection-by-id>, "%s"', $e->getMessage()));
+            error_log(sprintf('tadada-auth <del-all-connection-by-id>, "%s"', $e->getMessage()));
         }
     }
 
@@ -396,21 +434,29 @@ class Auth {
             if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
                 throw new Exception('Bad method');
             }
-            $content = json_decode(file_get_contents('php://input'), true);
+            $body = file_get_contents('php://input');
+            $content = [];            
+            if (!empty($body)) { $content = json_decode($body, true); }
             switch ($step) {
                 default: throw new Exception('Unknown step');
                 case 'init':
-                    $this->delete_outdated(); // on init we delete outdated connection
+                    $cnonce = null;
+                    $hash = 'SHA-256';
+                    if (!empty($content['hash']) && isset(Auth::HASH[$content['hash']])) {
+                        $hash = $content['hash'];
+                    }
+                    if (!empty($content['cnonce'])) { $cnonce = base64_decode($content['cnonce']); }
                     if(empty($content['userid'])) { throw new Exception(); }
                     $data = $user->get($content['userid']);
                     if (!$data) { throw new Exception();}
-                    $auth = $this->generate_auth($data['id'], $data['key']);
+                    $auth = $this->generate_auth($data['id'], $data['key'], $cnonce, $data['algo']);
                     if (empty($auth)) { throw new Exception(); }
                     $response = [
                         'auth' => $auth,
                         'count' => $data['key_iterations'],
                         'salt' => $data['key_salt'],
-                        'userid' => intval($data['id'])
+                        'userid' => intval($data['id']),
+                        'algo' => $data['algo']
                     ];
                     echo json_encode($response);
                     break;
@@ -421,6 +467,11 @@ class Auth {
                     if (!$this->confirm_auth($content['auth'])) { throw new Exception(); }
                     $this->refresh_auth($content['auth']);
                     if ($step === 'getshareable') {
+                        $hash = 'SHA-256';
+                        if (!empty($content['hash']) && isset(Auth::HASH[$content['hash']])) {
+                            $hash = $content['hash'];
+                        }
+                        $once = ((isset($content['once'])) ? ($content['once'] == true) : false);
                         $permanent = (isset($content['permanent']) ? ($content['permanent'] == true) : false);
                         $comment = (isset($content['comment']) ? htmlspecialchars(strval($content['comment'])) : '');
                         $duration = (isset($content['duration']) ? intval($content['duration']) : 86400);
@@ -429,9 +480,11 @@ class Auth {
                             $userid,
                             $content['auth'],
                             $content['url'], 
-                            $permanent ? Auth::SHARE_PERMANENT : Auth::SHARE_TEMPORARY,
+                            $once ? ($permanent ? Auth::SHARE_UNLIMITED_ONCE : Auth::SHARE_LIMITED_ONCE) 
+                                  : ($permanent ? Auth::SHARE_PERMANENT : Auth::SHARE_TEMPORARY),
                             $comment,
-                            $duration
+                            $duration,
+                            $hash
                         );
                         $this->confirm_auth($token);
                         if (empty($token)) { throw new Exception(); }
@@ -454,17 +507,12 @@ class Auth {
                     $token = $this->get_auth_token();
                     if (!$this->check_auth($token)) { throw new Exception(); }
                     $userid = $this->get_id($token);
+                    if (!$userid) { throw new Exception(); }
                     if (empty($content['userid'])) { throw new Exception(); }
-                    $stmt =$this->pdo->prepare('SELECT "person_id", "person_level" FROM "person" WHERE "person_id" = :id');
-                    $stmt->bindValue(':id', intval($userid), PDO::PARAM_INT);
-                    $stmt->execute();
-                    if ($stmt->rowCount() !== 1) { throw new Exception(); }
-                    $data = $stmt->fetch(PDO::FETCH_ASSOC);
-                    if (intval($data['person_level']) > 16) { 
-                        if (intval($data['person_id']) !== intval($content['userid'])) {
-                            throw new Exception(); 
-                        }
-                    }
+                    if (
+                        intval($content['userid']) !== intval($userid)
+                        && !$user->canImpersonate($userid, $content['userid'])
+                    ) { throw new Exception(); }
                     $connections = $this->get_active_connection($content['userid']);
                     echo json_encode(['userid' => intval($content['userid']), 'connections' => $connections]);
                     break;
@@ -475,16 +523,10 @@ class Auth {
                     if (!$this->check_auth($token)) { throw new Exception(); }
                     $userid = $this->get_id($token);
                     if (empty($content['userid'])) { throw new Exception(); }
-                    $stmt =$this->pdo->prepare('SELECT "person_id", "person_level" FROM "person" WHERE "person_id" = :id');
-                    $stmt->bindValue(':id', intval($userid), PDO::PARAM_INT);
-                    $stmt->execute();
-                    if ($stmt->rowCount() !== 1) { throw new Exception(); }
-                    $data = $stmt->fetch(PDO::FETCH_ASSOC);
-                    if (intval($data['person_level']) > 16) { 
-                        if (intval($data['person_id']) !== intval($content['userid'])) {
-                            throw new Exception(); 
-                        }
-                    }
+                    if (
+                        intval($content['userid']) !== intval($userid)
+                        && !$user->canImpersonate($userid, $content['userid'])
+                    ) { throw new Exception(); }
                     switch($step) {
                         case 'disconnect': 
                             if (!$this->del_all_connections($content['userid'])) { throw new Exception(); } 
@@ -504,15 +546,52 @@ class Auth {
                     if (empty($content['uid'])) { throw new Exception(); }
                     $conn = $this->get_auth_by_id($content['uid']);
                     if (!$conn) { throw new Exception(); }
+                    $userid = $this->get_id($token);
+                    if (!$userid) { throw new Exception(); }
+                    if (
+                        intval($conn['userid']) !== intval($userid)
+                        && !$user->canImpersonate($userid, $conn['userid'])
+                    ) { throw new Exception(); }
                     $success = $this->del_all_connection_by_id($conn['uid']);
                     echo json_encode(['done' => $success]);
+                    break;
+                case 'setpassword':
+                    $token = $this->get_auth_token();
+                    if (!$this->check_auth($token)) { throw new Exception(); }
+                    $userid = $this->get_id($token);
+                    if (!$userid) { throw new Exception(); }
+                    if (empty($content['userid'])) { throw new Exception(); }
+                    if (empty($content['key'])) { throw new Exception(); }
+                    if (empty($content['salt'])) { throw new Exception(); }
+                    if (empty($content['iterations'])) { throw new Exception(); }
+                    if (empty($content['algo'])) { throw new Exception(); }
+                    if (
+                        intval($content['userid']) !== intval($userid)
+                        && !$user->canImpersonate($userid, $content['userid'])
+                    ) { throw new Exception(); }
+                    $user->setPassword($content['userid'], $content['key'],
+                        ['key_algo' => $content['algo'], 
+                        'key_iterations' => $content['iterations'],
+                        'key_salt' => $content['salt']
+                        ]
+                    );
+                    echo json_encode(['userid' => intval($content['userid'])]);
+                    break;
+                case 'whoami':
+                    $token = $this->get_auth_token();
+                    if (!$this->check_auth($token)) { throw new Exception(); }
+                    $stmt = $this->pdo->prepare(sprintf('SELECT "userid" FROM %s WHERE auth = :token', $this->table));
+                    $stmt->bindValue(':token', $token, PDO::PARAM_STR);
+                    $stmt->execute();
+                    if ($stmt->rowCount() !== 1) { throw new Exception(); }
+                    $data = $stmt->fetch(PDO::FETCH_ASSOC);
+                    echo json_encode(['userid' => intval($data['userid'])]);
                     break;
             }
         } catch (Exception $e) {
             $msg = $e->getMessage();
-            error_log(var_export($e, true));
-            if (empty($msg)) { $msg = 'Wrong parameter'; }
-            echo json_encode(['error' => $msg]);
+            if (!empty($msg)) { error_log($msg); }
+            echo json_encode(['error' => 'Wrong parameter']); // not specific 
             exit(0);
         }
     }
