@@ -17,6 +17,7 @@ class Auth {
     protected $timeout;
     protected $current_userid;
 
+    const U_CONST_TIME = 100000;
     const HASH = [
         'SHA-256' => ['sha256', 32],
         'SHA-384' => ['sha384', 48],
@@ -440,17 +441,18 @@ class Auth {
             switch ($step) {
                 default: throw new Exception('Unknown step');
                 case 'init':
+                    $start = microtime();
                     $cnonce = null;
                     $hash = 'SHA-256';
                     if (!empty($content['hash']) && isset(Auth::HASH[$content['hash']])) {
                         $hash = $content['hash'];
                     }
                     if (!empty($content['cnonce'])) { $cnonce = base64_decode($content['cnonce']); }
-                    if(empty($content['userid'])) { throw new Exception(); }
+                    if(empty($content['userid'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
                     $data = $user->get($content['userid']);
-                    if (!$data) { throw new Exception();}
+                    if (!$data) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception();}
                     $auth = $this->generate_auth($data['id'], $data['key'], $cnonce, $data['algo']);
-                    if (empty($auth)) { throw new Exception(); }
+                    if (empty($auth)) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
                     $response = [
                         'auth' => $auth,
                         'count' => $data['key_iterations'],
@@ -458,13 +460,15 @@ class Auth {
                         'userid' => intval($data['id']),
                         'algo' => $data['algo']
                     ];
+                    usleep($this::U_CONST_TIME - (microtime() + $start));
                     echo json_encode($response);
                     break;
                 case 'getshareable':
                     if (empty($content['url'])) { throw new Exception(); }
                 case 'check':
-                    if (empty($content['auth'])) { throw new Exception(); }
-                    if (!$this->confirm_auth($content['auth'])) { throw new Exception(); }
+                    $start = microtime();
+                    if (empty($content['auth'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                    if (!$this->confirm_auth($content['auth'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
                     $this->refresh_auth($content['auth']);
                     if ($step === 'getshareable') {
                         $hash = 'SHA-256';
@@ -487,10 +491,12 @@ class Auth {
                             $hash
                         );
                         $this->confirm_auth($token);
-                        if (empty($token)) { throw new Exception(); }
+                        if (empty($token)) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                        usleep($this::U_CONST_TIME - (microtime() + $start));
                         echo json_encode(['done' => true, 'token' => $token, 'duration' => $duration]);
                         break;
                     }
+                    usleep($this::U_CONST_TIME - (microtime() + $start));
                     echo json_encode(['done' => true]);
                     break;
                 case 'quit':
