@@ -238,6 +238,9 @@ TaDaDaJS.prototype.getCurrentUser = function () {
         .then(result => {
             return resolve(result.userid)
         })
+        .catch(cause => {
+            reject(new Error('login error', {cause}))
+        })
     })
 }
 
@@ -296,6 +299,27 @@ TaDaDaJS.prototype.getShareableToken = function (url, comment = '', duration = 8
         .then(result => {
             if (!result.done) { return reject(new Error('login error'))}
             return resolve(result.token)
+        })
+        .catch(e => {
+            return reject(new Error('login error', {cause: e}))
+        })
+    })
+}
+
+TaDaDaJS.prototype.getShareableUrl = function (base, url, comment = '', duration = 86400, once = false) {
+    return new Promise((resolve, reject) => {
+        this.getToken()
+        .then(token => {
+            return fetch(new URL(`${this.path}/getshareable`, this.base), {method: 'POST', body: JSON.stringify({auth: token, url, comment, permanent: duration <= 0, duration, once, hash: this.halgo})})
+        })
+        .then(response => {
+            if (!response.ok) { return reject(new Error('login error')) }
+            return response.json()
+        })
+        .then(result => {
+            if (!result.done) { return reject(new Error('login error')) }
+            const token = result.token.replaceAll('/', '_').replaceAll('+', '-').replaceAll('=', '.')
+            return resolve((new URL(`${encodeURIComponent(result.urlid)}/${encodeURIComponent(token)}`, base)).toString())
         })
         .catch(e => {
             return reject(new Error('login error', {cause: e}))

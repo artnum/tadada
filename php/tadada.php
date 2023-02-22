@@ -43,6 +43,17 @@ class Auth {
         return $this->current_userid;
     }
 
+    function find_url($token, $id) {
+        $stmt = $this->pdo->prepare(sprintf('SELECT url FROM %s WHERE auth = :token AND urlid = :urlid', $this->table));
+        $stmt->bindValue(':urlid', $id, PDO::PARAM_STR);
+        $stmt->bindValue(':token', $token, PDO::PARAM_STR);
+
+        if(!$stmt->execute()) { return false; }
+        $row = $stmt->fetch();
+        if (!$row || empty($row)) { return false; }
+        return $row['url'];
+    }
+
     function generate_auth ($userid, $hpw, $cnonce = '', $hash = 'SHA-256') {
         $sign = random_bytes(Auth::HASH[$hash][1]);
         $authvalue = base64_encode(hash_hmac(Auth::HASH[$hash][0], $sign . $cnonce, base64_decode($hpw), true));
@@ -492,8 +503,9 @@ class Auth {
                         );
                         $this->confirm_auth($token);
                         if (empty($token)) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                        $urlid = sha1($this->prepare_url($content['url']));
                         usleep($this::U_CONST_TIME - (microtime() + $start));
-                        echo json_encode(['done' => true, 'token' => $token, 'duration' => $duration]);
+                        echo json_encode(['done' => true, 'token' => $token, 'duration' => $duration, 'urlid' => $urlid]);
                         break;
                     }
                     usleep($this::U_CONST_TIME - (microtime() + $start));
