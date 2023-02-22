@@ -260,6 +260,7 @@ class Auth {
             }
         } catch(Exception $e) {
             error_log(sprintf('tadada-auth <check-auth>, "%s"', $e->getMessage()));
+            return false;
         }
     }
 
