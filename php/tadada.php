@@ -438,6 +438,11 @@ class Auth {
         }
     }
 
+    function usleep ($time) {
+        if ($time > 0) { return usleep($time); }
+        return;
+    }
+
     function run ($step, User $user) {        
         try {
             header('Content-Type: application/json', true);
@@ -453,18 +458,18 @@ class Auth {
             switch ($step) {
                 default: throw new Exception('Unknown step');
                 case 'init':
-                    $start = microtime();
+                    $start = microtime(true);
                     $cnonce = null;
                     $hash = 'SHA-256';
                     if (!empty($content['hash']) && isset(Auth::HASH[$content['hash']])) {
                         $hash = $content['hash'];
                     }
                     if (!empty($content['cnonce'])) { $cnonce = base64_decode($content['cnonce']); }
-                    if(empty($content['userid'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                    if(empty($content['userid'])) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception(); }
                     $data = $user->get($content['userid']);
-                    if (!$data) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception();}
+                    if (!$data) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception();}
                     $auth = $this->generate_auth($data['id'], $data['key'], $cnonce, $data['algo']);
-                    if (empty($auth)) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                    if (empty($auth)) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception(); }
                     $response = [
                         'auth' => $auth,
                         'count' => $data['key_iterations'],
@@ -472,15 +477,15 @@ class Auth {
                         'userid' => intval($data['id']),
                         'algo' => $data['algo']
                     ];
-                    usleep($this::U_CONST_TIME - (microtime() + $start));
+                    $this->usleep($this::U_CONST_TIME - (microtime(true) + $start));
                     echo json_encode($response);
                     break;
                 case 'getshareable':
                     if (empty($content['url'])) { throw new Exception(); }
                 case 'check':
-                    $start = microtime();
-                    if (empty($content['auth'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
-                    if (!$this->confirm_auth($content['auth'])) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                    $start = microtime(true);
+                    if (empty($content['auth'])) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception(); }
+                    if (!$this->confirm_auth($content['auth'])) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception(); }
                     $this->refresh_auth($content['auth']);
                     if ($step === 'getshareable') {
                         $hash = 'SHA-256';
@@ -503,13 +508,13 @@ class Auth {
                             $hash
                         );
                         $this->confirm_auth($token);
-                        if (empty($token)) { usleep($this::U_CONST_TIME - (microtime() + $start)); throw new Exception(); }
+                        if (empty($token)) { $this->usleep($this::U_CONST_TIME - (microtime(true) + $start)); throw new Exception(); }
                         $urlid = sha1($this->prepare_url($content['url']));
-                        usleep($this::U_CONST_TIME - (microtime() + $start));
+                        $this->usleep($this::U_CONST_TIME - (microtime(true) + $start));
                         echo json_encode(['done' => true, 'token' => $token, 'duration' => $duration, 'urlid' => $urlid]);
                         break;
                     }
-                    usleep($this::U_CONST_TIME - (microtime() + $start));
+                    $this->usleep($this::U_CONST_TIME - (microtime(true) + $start));
                     echo json_encode(['done' => true]);
                     break;
                 case 'quit':

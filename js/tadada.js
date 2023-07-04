@@ -1,3 +1,7 @@
+/**
+ * Store authentication data into indexedDB.
+ * @class
+ */
 function TaDaDaJSKV() {
     this._kvstore = null
 }
@@ -75,7 +79,13 @@ TaDaDaJSKV.prototype.del = function (name) {
     })
 }
 
-
+/**
+ * Authentication using TaDaDa.
+ * @class
+ * @param {string} [path='.auth']
+ * @param {(string|URL)} [base=null] Base URL, use window.location if null
+ * @returns 
+ */
 function TaDaDaJS (path = '.auth', base = null) {
     if (TaDaDaJS._instance) { return TaDaDaJS._instance }
     this.path = path
