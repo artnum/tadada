@@ -316,6 +316,15 @@ TaDaDaJS.prototype.getShareableToken = function (url, comment = '', duration = 8
     })
 }
 
+/**
+ * Generate an URL aimed to be used through proxy (see ../php/proxy.php).
+ * @param {URL} base Base URL for share proxy
+ * @param {URL} url URL to share
+ * @param {string} comment A comment that can be associated to shared URL
+ * @param {number} duration Duration, in second, of the link
+ * @param {boolean} once True if this URL is for one use
+ * @returns {URL} An URL in the form of ${base}/${proxy_stuff}
+ */
 TaDaDaJS.prototype.getShareableUrl = function (base, url, comment = '', duration = 86400, once = false) {
     return new Promise((resolve, reject) => {
         this.getToken()

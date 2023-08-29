@@ -1,0 +1,9 @@
+{
+    "name": "artnum/tadada",
+    "description": "Server part for tadada auth",
+    "license": "MIT",
+    "version": "0.2.1",
+    "require": {
+        "php": ">=8.2"
+    }
+}
